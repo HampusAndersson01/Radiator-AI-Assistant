@@ -32,21 +32,92 @@ def get_db():
     """Get a new database connection"""
     return psycopg2.connect(DATABASE_URL)
 
+@dp.message_handler(commands=['start'])
+async def start(msg: types.Message):
+    """Welcome message with menu button"""
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add(types.KeyboardButton("🔧 Set Radiator"))
+    keyboard.add(types.KeyboardButton("📊 Status"))
+    
+    await msg.reply(
+        "🏠 *Smart Radiator Assistant*\n\n"
+        "Control your radiators with AI-powered temperature management.\n\n"
+        "Use the menu below or type /set",
+        reply_markup=keyboard,
+        parse_mode="Markdown"
+    )
+
+@dp.message_handler(lambda msg: msg.text == "🔧 Set Radiator")
 @dp.message_handler(commands=['set'])
 async def set_radiator(msg: types.Message):
-    kb = types.InlineKeyboardMarkup()
-    for room in ROOMS:
-        kb.add(types.InlineKeyboardButton(text=room, callback_data=f"room:{room}"))
-    await msg.reply("Select room radiator:", reply_markup=kb)
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    buttons = [
+        types.InlineKeyboardButton(text=f"🌡️ {room}", callback_data=f"room:{room}")
+        for room in ROOMS
+    ]
+    kb.add(*buttons)
+    await msg.reply("*Select room:*", reply_markup=kb, parse_mode="Markdown")
+
+@dp.message_handler(lambda msg: msg.text == "📊 Status")
+async def status(msg: types.Message):
+    """Show current radiator levels"""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT room, level, updated_at FROM radiators ORDER BY room")
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        
+        if not rows:
+            await msg.reply("No radiator levels set yet. Use 🔧 Set Radiator to configure.")
+            return
+        
+        status_text = "📊 *Current Radiator Levels:*\n\n"
+        for room, level, updated in rows:
+            target = ROOMS.get(room, {}).get("target", "?")
+            status_text += f"🌡️ *{room}*: Level {level} (Target {target}°C)\n"
+            status_text += f"   _Updated: {updated.strftime('%H:%M %d/%m')}_\n\n"
+        
+        await msg.reply(status_text, parse_mode="Markdown")
+    except Exception as e:
+        await msg.reply(f"⚠️ Error fetching status: {str(e)}")
 
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith("room:"))
 async def choose_level(callback: types.CallbackQuery):
     room = callback.data.split(":", 1)[1]
     scale = ROOMS[room]["scale"]
-    kb = types.InlineKeyboardMarkup()
+    target = ROOMS[room]["target"]
+    
+    # Get current level from database
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT level FROM radiators WHERE room = %s", (room,))
+        result = cur.fetchone()
+        current = result[0] if result else 0
+        cur.close()
+        conn.close()
+    except:
+        current = 0
+    
+    # Create keyboard with 3 columns
+    kb = types.InlineKeyboardMarkup(row_width=3)
+    buttons = []
     for lvl in scale:
-        kb.add(types.InlineKeyboardButton(str(lvl), callback_data=f"set:{room}:{lvl}"))
-    await callback.message.edit_text(f"🔧 {room}\nTarget {ROOMS[room]['target']}°C\nChoose level:", reply_markup=kb)
+        # Highlight current level
+        text = f"✓ {lvl}" if lvl == current else str(lvl)
+        buttons.append(types.InlineKeyboardButton(text, callback_data=f"set:{room}:{lvl}"))
+    kb.add(*buttons)
+    
+    await callback.message.edit_text(
+        f"🌡️ *{room}*\n"
+        f"Target: {target}°C\n"
+        f"Current: {current}\n\n"
+        f"Select level:",
+        reply_markup=kb,
+        parse_mode="Markdown"
+    )
 
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith("set:"))
 async def confirm(callback: types.CallbackQuery):

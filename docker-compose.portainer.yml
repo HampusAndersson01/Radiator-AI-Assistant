@@ -1,0 +1,34 @@
+version: "3.8"
+services:
+  ai_service:
+    image: radiator-ai-service:latest
+    pull_policy: never
+    ports:
+      - "8000:8000"
+    environment:
+      - TELEGRAM_WEBHOOK=${TELEGRAM_WEBHOOK}
+    volumes:
+      - ai_models:/app/models
+      - ai_state:/app
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  bot:
+    image: radiator-bot:latest
+    pull_policy: never
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - AI_URL=http://ai_service:8000/train
+    depends_on:
+      - ai_service
+    restart: unless-stopped
+
+volumes:
+  ai_models:
+  ai_state:

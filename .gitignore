@@ -1,0 +1,8 @@
+.env
+*.pkl
+last_temps.json
+radiators.db
+__pycache__/
+*.pyc
+.vscode/
+models/

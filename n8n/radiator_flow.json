@@ -1,0 +1,242 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "mode": "every",
+        "value": "10",
+        "timezone": "Europe/Stockholm"
+      },
+      "id": "1",
+      "name": "Cron Trigger",
+      "type": "n8n-nodes-base.cron",
+      "position": [
+        300,
+        150
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://homeassistant.local:8123/api/states",
+        "headers": {
+          "Authorization": "Bearer <YOUR_HA_TOKEN>",
+          "Content-Type": "application/json"
+        }
+      },
+      "id": "2",
+      "name": "Fetch Room Temps",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        500,
+        150
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "const rooms = ['Bedroom', 'Living Room', 'Office', 'Bathroom', 'Hallway'];\nconst forecast = $json.forecast_temp;\nconst outside = $json.outdoor_temp;\nreturn rooms.map(room => ({ json: { room, current_temp: parseFloat($json[room.toLowerCase().replace(' ','_')+'_temp']), target_temp: parseFloat($json[room.toLowerCase().replace(' ','_')+'_target']), radiator_level: $json[room+'_level'], outdoor_temp: outside, forecast_temp: forecast, timestamp: new Date().toISOString() } }));"
+      },
+      "id": "3",
+      "name": "Build Training Payloads",
+      "type": "n8n-nodes-base.function",
+      "position": [
+        700,
+        150
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://ai_service:8000/train",
+        "bodyParametersJson": "={{$json}}"
+      },
+      "id": "4",
+      "name": "Train AI",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        900,
+        150
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://ai_service:8000/predict",
+        "bodyParametersJson": "={{$json}}"
+      },
+      "id": "5",
+      "name": "Predict AI",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        1100,
+        150
+      ]
+    },
+    {
+      "parameters": {
+        "webhookUrl": "http://<YOUR_TELEGRAM_WEBHOOK_URL>"
+      },
+      "id": "6",
+      "name": "Telegram Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "position": [
+        1300,
+        150
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.open-meteo.com/v1/forecast?latitude=57.1&longitude=12.25&hourly=temperature_2m&forecast_days=1",
+        "headers": {},
+        "responseFormat": "json"
+      },
+      "id": "7",
+      "name": "Fetch Forecast",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        500,
+        350
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "const temps = $json.hourly.temperature_2m;\nreturn { outdoor_temp: temps[0], forecast_temp: temps[3] || temps[0] };"
+      },
+      "id": "8",
+      "name": "Extract Forecast Temps",
+      "type": "n8n-nodes-base.function",
+      "position": [
+        700,
+        350
+      ]
+    },
+    {
+      "parameters": {
+        "command": "sqlite3 /workspace/bot/radiators.db \"SELECT room, level FROM radiators;\""
+      },
+      "id": "9",
+      "name": "Fetch Radiator Levels",
+      "type": "n8n-nodes-base.executeCommand",
+      "position": [
+        500,
+        550
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "const lines = $input.item.json.stdout.split('\\n');\nreturn lines.filter(Boolean).map(l => { const [room, level] = l.split('|'); return { room, level: Number(level) }; });"
+      },
+      "id": "10",
+      "name": "Parse Radiator Levels",
+      "type": "n8n-nodes-base.function",
+      "position": [
+        700,
+        550
+      ]
+    }
+  ],
+  "connections": {
+    "Cron Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Room Temps",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Room Temps": {
+      "main": [
+        [
+          {
+            "node": "Fetch Forecast",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Forecast": {
+      "main": [
+        [
+          {
+            "node": "Extract Forecast Temps",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Forecast Temps": {
+      "main": [
+        [
+          {
+            "node": "Fetch Radiator Levels",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Radiator Levels": {
+      "main": [
+        [
+          {
+            "node": "Parse Radiator Levels",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Radiator Levels": {
+      "main": [
+        [
+          {
+            "node": "Build Training Payloads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Training Payloads": {
+      "main": [
+        [
+          {
+            "node": "Train AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Train AI": {
+      "main": [
+        [
+          {
+            "node": "Predict AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Predict AI": {
+      "main": [
+        [
+          {
+            "node": "Telegram Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {},
+  "id": "workflow_radiator_control"
+}

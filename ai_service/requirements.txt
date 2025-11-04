@@ -1,7 +1,8 @@
 fastapi
-uvicorn[standard]
+uvicorn
 pydantic
 requests
 river
 joblib
 pandas
+psycopg2-binary

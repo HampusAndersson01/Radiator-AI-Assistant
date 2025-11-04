@@ -2,13 +2,16 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 from datetime import datetime
-import os, joblib, requests, json, sqlite3
+import os, joblib, requests, json
+import psycopg2
 from river import forest, preprocessing
 from forecast import get_weather
 
 app = FastAPI(title="Smart Radiator AI")
 MODELS_DIR = "models"
 STATE_FILE = "last_temps.json"
+DATABASE_URL = os.getenv("DATABASE_URL")
+
 os.makedirs(MODELS_DIR, exist_ok=True)
 if not os.path.exists(STATE_FILE):
     open(STATE_FILE, "w").write("{}")
@@ -49,16 +52,16 @@ def save_state(data):
         json.dump(data, f)
 
 def get_radiator_levels():
-    """Get current radiator levels from bot database"""
-    db_path = "/shared/radiators.db"
-    if not os.path.exists(db_path):
+    """Get current radiator levels from PostgreSQL database"""
+    if not DATABASE_URL:
         return {}
     
     try:
-        conn = sqlite3.connect(db_path)
+        conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
         cursor.execute("SELECT room, level FROM radiators")
         levels = {row[0]: row[1] for row in cursor.fetchall()}
+        cursor.close()
         conn.close()
         return levels
     except Exception as e:

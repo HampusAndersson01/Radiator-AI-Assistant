@@ -1,5 +1,20 @@
 version: "3.8"
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_DB=radiator
+      - POSTGRES_USER=nameless
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-radiator123}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U radiator"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   ai_service:
     build:
       context: ./ai_service
@@ -10,10 +25,13 @@ services:
       - "8000:8000"
     environment:
       - TELEGRAM_WEBHOOK=${TELEGRAM_WEBHOOK}
+      - DATABASE_URL=postgresql://radiator:${POSTGRES_PASSWORD:-radiator123}@postgres:5432/radiator
     volumes:
-      - ai_models:/app-v1.0.1/models
-      - ai_state:/app-v1.0.1
-      - shared_db:/shared
+      - ai_models:/app-v1.0.2/models
+      - ai_state:/app-v1.0.2
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
     deploy:
       resources:
@@ -32,15 +50,15 @@ services:
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
       - AI_URL=http://ai_service:8000/train
-    volumes:
-      - shared_db:/shared
+      - DATABASE_URL=postgresql://radiator:${POSTGRES_PASSWORD:-radiator123}@postgres:5432/radiator
     depends_on:
-      - ai_service
+      postgres:
+        condition: service_healthy
+      ai_service:
+        condition: service_started
     restart: unless-stopped
 
 volumes:
   ai_models:
   ai_state:
-  shared_db:
-    external: true
-    name: radiator_shared_db
+  postgres_data:

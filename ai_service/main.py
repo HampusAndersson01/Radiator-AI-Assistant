@@ -2,7 +2,7 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 from datetime import datetime
-import os, joblib, requests, json
+import os, joblib, requests, json, sqlite3
 from river import forest, preprocessing
 from forecast import get_weather
 
@@ -48,10 +48,28 @@ def save_state(data):
     with open(STATE_FILE, "w") as f:
         json.dump(data, f)
 
+def get_radiator_levels():
+    """Get current radiator levels from bot database"""
+    db_path = "/shared/radiators.db"
+    if not os.path.exists(db_path):
+        return {}
+    
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT room, level FROM radiators")
+        levels = {row[0]: row[1] for row in cursor.fetchall()}
+        conn.close()
+        return levels
+    except Exception as e:
+        print(f"Error reading radiator levels: {e}")
+        return {}
+
 @app.get("/")
 def status():
     """Return AI service status and model information"""
     state = load_state()
+    radiator_levels = get_radiator_levels()
     
     models_info = {}
     for room in ROOMS.keys():
@@ -62,6 +80,7 @@ def status():
             "last_temp": state.get(room),
             "target_temp": ROOMS[room]["target"],
             "scale_range": f"{ROOMS[room]['scale'][0]}-{ROOMS[room]['scale'][-1]}",
+            "current_level": radiator_levels.get(room, 0),
         }
     
     # Get current weather

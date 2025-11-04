@@ -9,7 +9,11 @@ if BOT_TOKEN is None:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
 
-conn = sqlite3.connect("radiators.db", check_same_thread=False)
+# Use shared database location
+DB_PATH = os.getenv("DB_PATH", "/shared/radiators.db")
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cur = conn.cursor()
 cur.execute("CREATE TABLE IF NOT EXISTS radiators(room TEXT PRIMARY KEY, level INT)")
 conn.commit()

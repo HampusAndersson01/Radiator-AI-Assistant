@@ -1,7 +1,9 @@
 version: "3.8"
 services:
   ai_service:
-    build: ./ai_service
+    build:
+      context: ./ai_service
+      no_cache: true
     image: radiator-ai-service:latest
     pull_policy: build
     ports:
@@ -21,7 +23,9 @@ services:
               capabilities: [gpu]
 
   bot:
-    build: ./bot
+    build:
+      context: ./bot
+      no_cache: true
     image: radiator-bot:latest
     pull_policy: build
     environment:

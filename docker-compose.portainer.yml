@@ -25,6 +25,7 @@ services:
       - BOT_TOKEN=${BOT_TOKEN}
       - AI_URL=http://ai_service:8000/train
       - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@${POSTGRES_HOST:-host.docker.internal}:5432/radiator
+      - ALLOWED_CHAT_IDS=${ALLOWED_CHAT_IDS:-}
     depends_on:
       - ai_service
     restart: unless-stopped

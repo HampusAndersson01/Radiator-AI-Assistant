@@ -3,7 +3,7 @@ from aiogram.utils import executor
 import requests, os
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from config import ROOMS, BOT_TOKEN, AI_URL
+from config import ROOMS, BOT_TOKEN, AI_URL, ALLOWED_CHAT_IDS
 
 if BOT_TOKEN is None:
     raise SystemExit("BOT_TOKEN environment variable not set")
@@ -14,6 +14,12 @@ if DATABASE_URL is None:
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
+
+def is_authorized(user_id: int) -> bool:
+    """Check if user is authorized to use the bot"""
+    if not ALLOWED_CHAT_IDS:
+        return True  # If no restrictions configured, allow all
+    return user_id in ALLOWED_CHAT_IDS
 
 # Initialize database
 conn = psycopg2.connect(DATABASE_URL)
@@ -35,6 +41,10 @@ def get_db():
 @dp.message_handler(commands=['start'])
 async def start(msg: types.Message):
     """Welcome message with menu button"""
+    if not is_authorized(msg.from_user.id):
+        await msg.reply("⛔ Du har inte behörighet att använda denna bot.")
+        return
+    
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
     keyboard.add(types.KeyboardButton("🔧 Ställ in element"))
     keyboard.add(types.KeyboardButton("📊 Status"))
@@ -50,6 +60,10 @@ async def start(msg: types.Message):
 @dp.message_handler(lambda msg: msg.text == "🔧 Ställ in element")
 @dp.message_handler(commands=['set'])
 async def set_radiator(msg: types.Message):
+    if not is_authorized(msg.from_user.id):
+        await msg.reply("⛔ Du har inte behörighet att använda denna bot.")
+        return
+    
     kb = types.InlineKeyboardMarkup(row_width=2)
     buttons = [
         types.InlineKeyboardButton(text=room, callback_data=f"room:{room}")
@@ -61,6 +75,10 @@ async def set_radiator(msg: types.Message):
 @dp.message_handler(lambda msg: msg.text == "📊 Status")
 async def status(msg: types.Message):
     """Show current radiator levels"""
+    if not is_authorized(msg.from_user.id):
+        await msg.reply("⛔ Du har inte behörighet att använda denna bot.")
+        return
+    
     try:
         conn = get_db()
         cur = conn.cursor()
@@ -85,6 +103,10 @@ async def status(msg: types.Message):
 
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith("room:"))
 async def choose_level(callback: types.CallbackQuery):
+    if not is_authorized(callback.from_user.id):
+        await callback.answer("⛔ Du har inte behörighet att använda denna bot.", show_alert=True)
+        return
+    
     room = callback.data.split(":", 1)[1]
     scale = ROOMS[room]["scale"]
     target = ROOMS[room]["target"]
@@ -118,9 +140,14 @@ async def choose_level(callback: types.CallbackQuery):
         reply_markup=kb,
         parse_mode="Markdown"
     )
+    await callback.answer()
 
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith("set:"))
 async def confirm(callback: types.CallbackQuery):
+    if not is_authorized(callback.from_user.id):
+        await callback.answer("⛔ Du har inte behörighet att använda denna bot.", show_alert=True)
+        return
+    
     _, room, lvl = callback.data.split(":")
     lvl = float(lvl)
     
@@ -138,9 +165,11 @@ async def confirm(callback: types.CallbackQuery):
     except Exception as e:
         print(f"❌ Database error: {e}")
         await callback.message.edit_text(f"⚠️ Database error: {str(e)}")
+        await callback.answer()
         return
     
     await callback.message.edit_text(f"✅ {room} element inställt på {lvl} (måltemp {ROOMS[room]['target']}°C)")
+    await callback.answer()
 
     # Send a training ping (manual set). Current temp is left 0: n8n / sensors should provide real values
     try:

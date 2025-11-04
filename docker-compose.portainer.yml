@@ -1,7 +1,7 @@
 version: "3.8"
 services:
   ai_service:
-    image: hampusandersson01/radiator-ai-service:latest
+    image: namelesshampus/radiator-ai-service:latest
     ports:
       - "8000:8000"
     environment:
@@ -20,7 +20,7 @@ services:
               capabilities: [gpu]
 
   bot:
-    image: hampusandersson01/radiator-bot:latest
+    image: namelesshampus/radiator-bot:latest
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
       - AI_URL=http://ai_service:8000/train

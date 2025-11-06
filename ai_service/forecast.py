@@ -2,12 +2,12 @@ import requests
 from datetime import datetime, timedelta, timezone
 
 def get_weather(lat=59.5, lon=16):
-    """Return current outside temp and +3h forecast using SMHI API.
+    """Return current outside temp and +3h forecast using Open-Meteo API.
 
     Returns (current, forecast_3h)
     
-    SMHI API returns hourly forecasts with 't' (temperature in Celsius).
-    Free, no API key required.
+    Open-Meteo is a free weather API that provides temperature forecasts.
+    No API key required.
     """
     # Round coordinates to SMHI's grid (they use specific points)
     lat_rounded = round(lat, 6)

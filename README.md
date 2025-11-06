@@ -30,7 +30,7 @@ This repository provides a local, modular Smart Radiator Assistant consisting of
 
 1. Run everything locally on your Ubuntu server.
 2. Deploy via Portainer Stacks (docker-compose paste).
-3. Keep data local (models saved to `ai_service/models`).
+3. Keep data local (models saved to PostgreSQL database).
 
 ## Steps to deploy with Portainer (recommended)
 
@@ -102,7 +102,7 @@ The `docker-compose.yml` now includes GPU runtime configuration for the AI servi
 ## Troubleshooting tips
 
 - If Portainer fails to build: run `docker compose build` on the server manually to see build logs.
-- If ai_service can't reach Open-Meteo, check outgoing network/firewall.
+- If ai_service can't reach Open-Meteo API, check outgoing network/firewall.
 - If bot doesn't start, verify `BOT_TOKEN` is correct and container logs.
 
 ## Next steps / enhancements

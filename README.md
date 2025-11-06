@@ -50,9 +50,10 @@ Smart Radiator Assistant is a complete home automation solution that uses **onli
 
 ### 🤖 AI-Powered
 - **Online Machine Learning** using River (ARFRegressor)
+- **Dual weather forecasts** (3h + 10h ahead) for better predictions
+- **Night mode optimization** - predicts full 8-hour sleep period
+- **Self-training predictions** - validates and learns from own forecasts
 - Adapts to your heating preferences in real-time
-- Weather-aware predictions via Open-Meteo API
-- Comprehensive performance metrics
 
 </td>
 <td width="50%">
@@ -62,17 +63,19 @@ Smart Radiator Assistant is a complete home automation solution that uses **onli
 - **Telegram bot** for manual control
 - **n8n workflows** for Home Assistant integration
 - **RESTful API** with interactive docs
+- **Web dashboard** - visual monitoring and analytics
 
 </td>
 </tr>
 <tr>
 <td width="50%">
 
-### 📊 Monitoring
+### 📊 Advanced Analytics
 - Real-time AI statistics (MAE, RMSE, R²)
+- **Prediction validation tracking** - measures accuracy over time
 - Training history and prediction logs
-- Database-backed persistence
-- FastAPI interactive documentation
+- **Database-backed persistence** - survives restarts
+- Export data to CSV for analysis
 
 </td>
 <td width="50%">
@@ -81,11 +84,27 @@ Smart Radiator Assistant is a complete home automation solution that uses **onli
 - Pre-built Docker images on Docker Hub
 - Automated build & deployment scripts
 - PostgreSQL for data persistence
+- **Background validation** - auto-trains every hour
 - Scalable microservice architecture
 
 </td>
 </tr>
 </table>
+
+### 🌙 Night Mode
+In the evening (6 PM - 11 PM), the AI automatically switches to **night mode**:
+- Predicts temperature for the **next 8 hours** (full sleep period)
+- Uses 10-hour weather forecast for overnight planning
+- Prevents waking up cold at 3 AM
+- Optimizes radiator settings before bedtime
+
+### 🎯 Self-Improving AI
+The system learns from its own predictions:
+1. Makes a prediction (e.g., "temperature will be 19.5°C in 3 hours")
+2. Stores the prediction with timestamp
+3. After 3 hours, compares actual temperature to prediction
+4. Trains the model on the difference
+5. Gets better over time!
 
 ## 🚀 Quick Start
 
@@ -173,7 +192,9 @@ Interactive Telegram bot for manual radiator control and status queries.
 
 ## 🌐 API Endpoints
 
-### Training
+### Core Endpoints
+
+#### Training
 ```http
 POST /train
 ```
@@ -186,44 +207,96 @@ Train the model with new sensor data.
   "current_temp": 21.5,
   "target_temp": 22.0,
   "radiator_level": 4,
+  "outdoor_temp": 2.0,
+  "forecast_temp": -1.0,
+  "forecast_10h_temp": -5.0,
   "timestamp": "2025-11-06T18:00:00"
 }
 ```
 
-### Prediction
+#### Prediction
 ```http
 POST /predict
 ```
-Get AI-recommended radiator level.
-
-**Body:** Same as `/train`
+Get AI-recommended radiator level (with night mode optimization).
 
 **Response:**
 ```json
 {
-  "predicted_level": 3.8,
-  "room": "Bedroom",
-  "outdoor_temp": 5.2,
-  "timestamp": "2025-11-06T18:00:00"
+  "recommended": 4.5,
+  "error": 0.3,
+  "adjustment_needed": true,
+  "forecast_future": {
+    "hours_ahead": 8,
+    "mode": "night",
+    "recommended_level": 5.0,
+    "proactive_warning": true
+  }
 }
 ```
 
-### Statistics
+### Analytics Endpoints
+
+#### Statistics
 ```http
 GET /stats
 ```
-Get comprehensive AI performance metrics.
+Get comprehensive AI performance metrics including validation accuracy.
+
+#### Validation Stats
+```http
+GET /validation-stats?days=7
+```
+View prediction accuracy over time.
 
 **Response:**
 ```json
 {
-  "total_predictions": 1250,
-  "total_training_samples": 850,
-  "mae": 0.42,
-  "rmse": 0.58,
-  "r2_score": 0.87
+  "summary": {
+    "total_predictions": 150,
+    "total_trained": 142,
+    "avg_error": 0.34
+  },
+  "rooms": {
+    "Bedroom": {
+      "total_predictions": 50,
+      "avg_error": 0.28,
+      "used_for_training": 48
+    }
+  }
 }
 ```
+
+#### Validate Predictions
+```http
+POST /validate-predictions
+```
+Manually trigger validation of past predictions (also runs hourly automatically).
+
+### Data Export
+
+#### Historical Data
+```http
+GET /history/{room}?hours=24
+```
+Get temperature and radiator level history for graphing.
+
+#### CSV Export
+```http
+GET /export/csv/{room}?hours=168
+```
+Download CSV file for analysis in Excel/Python.
+
+### Web Dashboard
+```http
+GET /ui
+```
+Visual dashboard showing:
+- Real-time training events
+- Latest predictions
+- Per-room performance metrics
+- Validation statistics
+- Weather conditions
 
 ### Interactive Documentation
 Visit `http://localhost:8000/docs` for full Swagger UI documentation.
@@ -323,8 +396,8 @@ docker compose restart
 <summary><b>Database connection errors</b></summary>
 
 - Verify PostgreSQL is running and accessible
-- Check `DATABASE_URL` format: `postgresql://user:password@host:5432/radiator`
-- Ensure database `radiator` exists
+- Check `DATABASE_URL` format: `postgresql://user:password@host:5432/smart_radiator_ai`
+- Ensure database `smart_radiator_ai` exists
 </details>
 
 <details>
@@ -339,16 +412,51 @@ docker compose restart
 
 - **[Database Schema](DATABASE_SCHEMA.md)** - Complete database structure
 - **[API Documentation](http://localhost:8000/docs)** - Interactive Swagger UI (when running)
+- **[Web Dashboard](http://localhost:8000/ui)** - Visual monitoring interface
 - **[n8n Workflows](n8n/)** - Automation templates
+
+## 🔄 Database Management
+
+### Reset Database (Start Fresh)
+If you want to clear all training data and start learning from scratch:
+
+```bash
+./reset_database.sh
+```
+
+This will:
+- ❌ Delete all training history
+- ❌ Remove all ML models
+- ❌ Clear prediction logs
+- ✅ Recreate fresh database schema
+- ✅ Restart AI service with new feature set
+
+**Use this when:**
+- Updating model features (like adding 10h forecast)
+- Switching room configurations
+- Testing different learning approaches
+
+### Backup Database
+```bash
+docker compose exec postgres pg_dump -U postgres radiators > backup.sql
+```
+
+### Restore Database
+```bash
+cat backup.sql | docker compose exec -T postgres psql -U postgres radiators
+```
 
 ## 🎓 Academic Features
 
 This project includes comprehensive metrics for academic evaluation:
 
-- **Performance Metrics**: MAE, RMSE, R² scoring
-- **Training Analytics**: Sample counts, model convergence tracking
-- **Prediction Logging**: Full audit trail of AI decisions
-- **Database Persistence**: PostgreSQL-backed model state
+- **Performance Metrics**: MAE, RMSE, R² scoring with per-room granularity
+- **Prediction Validation**: Compares forecasts to actual outcomes
+- **Training Analytics**: Sample counts, model convergence tracking, validation accuracy
+- **Self-Learning Loop**: AI improves by validating its own predictions
+- **Database Persistence**: PostgreSQL-backed complete audit trail
+- **Export Capabilities**: CSV export for external analysis (Excel, Python, R)
+- **Time-Series Data**: Historical tracking for trend analysis
 
 ## 🤝 Contributing
 

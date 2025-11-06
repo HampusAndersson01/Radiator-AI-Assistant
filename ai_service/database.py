@@ -93,6 +93,13 @@ def init_database():
         );
         CREATE INDEX IF NOT EXISTS idx_predictions_room ON predictions(room);
         CREATE INDEX IF NOT EXISTS idx_predictions_timestamp ON predictions(timestamp);
+        
+        -- Add 3-hour prediction columns if they don't exist
+        ALTER TABLE predictions 
+        ADD COLUMN IF NOT EXISTS recommended_level_3h FLOAT,
+        ADD COLUMN IF NOT EXISTS predicted_error_3h FLOAT,
+        ADD COLUMN IF NOT EXISTS predicted_temp_3h FLOAT,
+        ADD COLUMN IF NOT EXISTS proactive_warning BOOLEAN DEFAULT FALSE;
     """)
     
     # ML models table - store serialized models
@@ -139,6 +146,30 @@ def init_database():
         );
         CREATE INDEX IF NOT EXISTS idx_radiator_history_room ON radiator_history(room);
         CREATE INDEX IF NOT EXISTS idx_radiator_history_timestamp ON radiator_history(timestamp);
+    """)
+    
+    # Future predictions table - store predictions that will be validated later
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS future_predictions (
+            id SERIAL PRIMARY KEY,
+            room VARCHAR(50) NOT NULL,
+            prediction_timestamp TIMESTAMP NOT NULL,
+            target_timestamp TIMESTAMP NOT NULL,
+            hours_ahead INTEGER NOT NULL,
+            predicted_temp FLOAT NOT NULL,
+            radiator_level FLOAT NOT NULL,
+            outdoor_temp FLOAT,
+            forecast_temp FLOAT,
+            actual_temp FLOAT,
+            validated BOOLEAN DEFAULT FALSE,
+            validated_at TIMESTAMP,
+            prediction_error FLOAT,
+            used_for_training BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_future_predictions_room ON future_predictions(room);
+        CREATE INDEX IF NOT EXISTS idx_future_predictions_target ON future_predictions(target_timestamp);
+        CREATE INDEX IF NOT EXISTS idx_future_predictions_validated ON future_predictions(validated);
     """)
     
     conn.commit()
@@ -211,7 +242,9 @@ def save_training_event(room: str, current_temp: float, target_temp: float,
 def save_prediction(room: str, current_temp: float, target_temp: float,
                     current_radiator_level: float, recommended_level: float,
                     predicted_error: float, adjustment_made: bool,
-                    outdoor_temp: float = None, forecast_temp: float = None):
+                    outdoor_temp: float = None, forecast_temp: float = None,
+                    recommended_level_3h: float = None, predicted_error_3h: float = None,
+                    predicted_temp_3h: float = None, proactive_warning: bool = False):
     """Save a prediction to the database"""
     conn = get_connection()
     cursor = conn.cursor()
@@ -220,11 +253,13 @@ def save_prediction(room: str, current_temp: float, target_temp: float,
         INSERT INTO predictions 
         (room, current_temp, target_temp, current_radiator_level, 
          recommended_level, predicted_error, adjustment_made,
-         outdoor_temp, forecast_temp)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+         outdoor_temp, forecast_temp, recommended_level_3h, 
+         predicted_error_3h, predicted_temp_3h, proactive_warning)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (room, current_temp, target_temp, current_radiator_level,
           recommended_level, predicted_error, adjustment_made,
-          outdoor_temp, forecast_temp))
+          outdoor_temp, forecast_temp, recommended_level_3h,
+          predicted_error_3h, predicted_temp_3h, proactive_warning))
     
     conn.commit()
     cursor.close()
@@ -596,3 +631,119 @@ def get_training_count_last_24h() -> int:
     except Exception as e:
         print(f"Error getting training count: {e}")
         return 0
+
+def save_future_prediction(room: str, hours_ahead: int, predicted_temp: float,
+                           radiator_level: float, outdoor_temp: float = None,
+                           forecast_temp: float = None):
+    """Save a future prediction that will be validated later"""
+    from datetime import datetime, timedelta
+    
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    prediction_time = datetime.now()
+    target_time = prediction_time + timedelta(hours=hours_ahead)
+    
+    cursor.execute("""
+        INSERT INTO future_predictions 
+        (room, prediction_timestamp, target_timestamp, hours_ahead, 
+         predicted_temp, radiator_level, outdoor_temp, forecast_temp)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    """, (room, prediction_time, target_time, hours_ahead, 
+          predicted_temp, radiator_level, outdoor_temp, forecast_temp))
+    
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+def get_unvalidated_predictions():
+    """Get predictions that are ready to be validated (target time has passed)"""
+    from datetime import datetime
+    
+    if not DATABASE_URL:
+        return []
+    
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cursor.execute("""
+            SELECT * FROM future_predictions
+            WHERE validated = FALSE 
+              AND target_timestamp <= NOW()
+            ORDER BY target_timestamp ASC
+        """)
+        
+        results = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        return [dict(row) for row in results]
+    except Exception as e:
+        print(f"Error getting unvalidated predictions: {e}")
+        return []
+
+def validate_prediction(prediction_id: int, actual_temp: float, used_for_training: bool = False):
+    """Validate a prediction by comparing with actual temperature"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        UPDATE future_predictions
+        SET actual_temp = %s,
+            validated = TRUE,
+            validated_at = NOW(),
+            prediction_error = ABS(predicted_temp - %s),
+            used_for_training = %s
+        WHERE id = %s
+    """, (actual_temp, actual_temp, used_for_training, prediction_id))
+    
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+def get_validation_stats(room: str = None, days: int = 7):
+    """Get statistics on prediction accuracy"""
+    if not DATABASE_URL:
+        return {}
+    
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        if room:
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as total_predictions,
+                    AVG(prediction_error) as avg_error,
+                    MIN(prediction_error) as min_error,
+                    MAX(prediction_error) as max_error,
+                    COUNT(CASE WHEN used_for_training THEN 1 END) as used_for_training
+                FROM future_predictions
+                WHERE room = %s 
+                  AND validated = TRUE
+                  AND validated_at > NOW() - INTERVAL '%s days'
+            """, (room, days))
+            result = cursor.fetchone()
+            cursor.close()
+            conn.close()
+            return dict(result) if result else {}
+        else:
+            cursor.execute("""
+                SELECT 
+                    room,
+                    COUNT(*) as total_predictions,
+                    AVG(prediction_error) as avg_error,
+                    COUNT(CASE WHEN used_for_training THEN 1 END) as used_for_training
+                FROM future_predictions
+                WHERE validated = TRUE
+                  AND validated_at > NOW() - INTERVAL '%s days'
+                GROUP BY room
+            """, (days,))
+            results = cursor.fetchall()
+            cursor.close()
+            conn.close()
+            return {row['room']: dict(row) for row in results}
+    except Exception as e:
+        print(f"Error getting validation stats: {e}")
+        return {}

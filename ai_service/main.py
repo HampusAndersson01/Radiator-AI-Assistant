@@ -8,8 +8,77 @@ from collections import defaultdict
 from river import forest, preprocessing, metrics
 from forecast import get_weather
 import database as db
+import asyncio
+from contextlib import asynccontextmanager
 
-app = FastAPI(title="Smart Radiator AI")
+# Background task for validating predictions
+async def validation_background_task():
+    """Background task that runs every hour to validate old predictions"""
+    while True:
+        try:
+            await asyncio.sleep(3600)  # Run every hour
+            print("🔍 Running prediction validation...")
+            
+            # Call the validation logic
+            unvalidated = db.get_unvalidated_predictions()
+            if unvalidated:
+                validated_count = 0
+                trained_count = 0
+                
+                for pred in unvalidated:
+                    room = pred['room']
+                    prediction_id = pred['id']
+                    predicted_temp = pred['predicted_temp']
+                    
+                    try:
+                        conn = db.get_connection()
+                        cursor = conn.cursor()
+                        
+                        cursor.execute("""
+                            SELECT current_temp, outdoor_temp 
+                            FROM room_states
+                            WHERE room = %s 
+                              AND timestamp >= %s - INTERVAL '30 minutes'
+                              AND timestamp <= %s + INTERVAL '30 minutes'
+                            ORDER BY ABS(EXTRACT(EPOCH FROM (timestamp - %s)))
+                            LIMIT 1
+                        """, (room, pred['target_timestamp'], pred['target_timestamp'], pred['target_timestamp']))
+                        
+                        result = cursor.fetchone()
+                        cursor.close()
+                        conn.close()
+                        
+                        if result:
+                            actual_temp = result[0]
+                            db.validate_prediction(prediction_id, actual_temp, used_for_training=True)
+                            validated_count += 1
+                            trained_count += 1
+                            print(f"  ✅ {room}: predicted {predicted_temp:.1f}°C vs actual {actual_temp:.1f}°C")
+                        else:
+                            db.validate_prediction(prediction_id, None, used_for_training=False)
+                            validated_count += 1
+                    except Exception as e:
+                        print(f"  ❌ Error validating prediction {prediction_id}: {e}")
+                
+                print(f"✅ Validated {validated_count} predictions ({trained_count} trained)")
+            else:
+                print("  ℹ️  No predictions to validate")
+                
+        except Exception as e:
+            print(f"Error in validation background task: {e}")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application lifecycle"""
+    # Startup
+    task = asyncio.create_task(validation_background_task())
+    print("🚀 Started prediction validation background task")
+    yield
+    # Shutdown
+    task.cancel()
+    print("🛑 Stopped prediction validation background task")
+
+app = FastAPI(title="Smart Radiator AI", lifespan=lifespan)
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Initialize database on startup
@@ -35,6 +104,7 @@ class RoomState(BaseModel):
     radiator_level: int
     outdoor_temp: float | None = None
     forecast_temp: float | None = None
+    forecast_10h_temp: float | None = None
     timestamp: str
 
 class ModelMetrics:
@@ -172,14 +242,16 @@ def status():
     
     # Get current weather with error handling
     try:
-        outdoor, forecast = get_weather()
+        outdoor, forecast_3h, forecast_10h = get_weather()
         if outdoor is None:
             outdoor = 0.0
-        if forecast is None:
-            forecast = 0.0
+        if forecast_3h is None:
+            forecast_3h = 0.0
+        if forecast_10h is None:
+            forecast_10h = 0.0
     except Exception as e:
         print(f"Error getting weather: {e}")
-        outdoor, forecast = 0.0, 0.0
+        outdoor, forecast_3h, forecast_10h = 0.0, 0.0, 0.0
     
     return {
         "status": "online",
@@ -188,7 +260,8 @@ def status():
         "rooms": models_info,
         "weather": {
             "outdoor_temp": outdoor,
-            "forecast_3h": forecast,
+            "forecast_3h": forecast_3h,
+            "forecast_10h": forecast_10h,
         },
         "telegram_webhook_configured": TELEGRAM_WEBHOOK is not None,
         "database_connected": DATABASE_URL is not None,
@@ -206,16 +279,18 @@ def train(state: RoomState):
     delta = state.current_temp - prev
 
     # Add weather if missing
-    if state.outdoor_temp is None or state.forecast_temp is None:
-        outside, forecast = get_weather()
+    if state.outdoor_temp is None or state.forecast_temp is None or state.forecast_10h_temp is None:
+        outside, forecast_3h, forecast_10h = get_weather()
         state.outdoor_temp = outside
-        state.forecast_temp = forecast
+        state.forecast_temp = forecast_3h
+        state.forecast_10h_temp = forecast_10h
 
     features = {
         "current_temp": state.current_temp,
         "target_temp": state.target_temp,
         "outdoor_temp": state.outdoor_temp,
-        "forecast_temp": state.forecast_temp,
+        "forecast_3h_temp": state.forecast_temp,
+        "forecast_10h_temp": state.forecast_10h_temp,
         "radiator_level": state.radiator_level,
         "hour_of_day": datetime.now().hour,
     }
@@ -271,22 +346,34 @@ def train(state: RoomState):
 
 @app.post("/predict")
 def predict(state: RoomState):
-    """Get radiator level recommendation"""
+    """Get radiator level recommendation optimized for nighttime (next 8 hours)"""
     model = load_model(state.room)
-    if state.outdoor_temp is None or state.forecast_temp is None:
-        outside, forecast = get_weather()
-        state.outdoor_temp, state.forecast_temp = outside, forecast
+    if state.outdoor_temp is None or state.forecast_temp is None or state.forecast_10h_temp is None:
+        outside, forecast_3h, forecast_10h = get_weather()
+        state.outdoor_temp, state.forecast_temp, state.forecast_10h_temp = outside, forecast_3h, forecast_10h
 
+    current_hour = datetime.now().hour
+    is_evening = 18 <= current_hour <= 23  # Evening time (6 PM - 11 PM)
+    
+    # Determine prediction horizon
+    prediction_hours = 8 if is_evening else 3
+    
     best_lvl = None
     best_err = float("inf")
     prediction_details = []
+    
+    best_lvl_future = None
+    best_err_future = float("inf")
+    prediction_details_future = []
 
+    # Current/immediate prediction
     for lvl in ROOMS[state.room]["scale"]:
         feat = {
             "current_temp": state.current_temp,
             "target_temp": state.target_temp,
             "outdoor_temp": state.outdoor_temp,
-            "forecast_temp": state.forecast_temp,
+            "forecast_3h_temp": state.forecast_temp,
+            "forecast_10h_temp": state.forecast_10h_temp,
             "radiator_level": lvl,
             "hour_of_day": datetime.now().hour,
         }
@@ -305,34 +392,123 @@ def predict(state: RoomState):
         
         if error < best_err:
             best_err, best_lvl = error, lvl
+    
+    # Future prediction - use appropriate forecast based on horizon
+    future_hour = (datetime.now().hour + prediction_hours) % 24
+    future_forecast_temp = state.forecast_10h_temp if prediction_hours >= 8 else state.forecast_temp
+    
+    for lvl in ROOMS[state.room]["scale"]:
+        feat_future = {
+            "current_temp": state.current_temp,
+            "target_temp": state.target_temp,
+            "outdoor_temp": future_forecast_temp,
+            "forecast_3h_temp": future_forecast_temp,
+            "forecast_10h_temp": future_forecast_temp,
+            "radiator_level": lvl,
+            "hour_of_day": future_hour,
+        }
+        try:
+            # Simulate hours ahead by iteratively predicting
+            temp_estimate = state.current_temp
+            for hour in range(prediction_hours):
+                feat_future["hour_of_day"] = (current_hour + hour + 1) % 24
+                delta_step = model.predict_one(feat_future) or 0
+                temp_estimate += delta_step
+                feat_future["current_temp"] = temp_estimate
+        except Exception:
+            temp_estimate = state.current_temp
+        
+        error_future = abs(temp_estimate - state.target_temp)
+        
+        prediction_details_future.append({
+            "level": lvl,
+            f"predicted_temp_{prediction_hours}h": round(temp_estimate, 2),
+            f"error_{prediction_hours}h": round(error_future, 2)
+        })
+        
+        if error_future < best_err_future:
+            best_err_future, best_lvl_future = error_future, lvl
 
     # Update metrics
     m = model_metrics[state.room]
     m.predictions_made += 1
     
     adjustment_made = False
+    proactive_warning = False
+    
     if best_lvl is None:
-        # Update metrics in database
-        db.update_ai_metrics(
-            state.room,
-            predictions_made=m.predictions_made
-        )
+        db.update_ai_metrics(state.room, predictions_made=m.predictions_made)
         return {"recommended": None, "error": None}
 
-    if abs(best_lvl - state.radiator_level) >= 1:
-        m.adjustments_made += 1
-        adjustment_made = True
-        
-        msg = (
-            f"🏠 {state.room}: set radiator to {best_lvl}\n"
-            f"🌡️ now {state.current_temp}°C → target {state.target_temp}°C\n"
-            f"🌤️ outside {state.outdoor_temp}°C, forecast {state.forecast_temp}°C"
-        )
-        if TELEGRAM_WEBHOOK:
-            try:
-                requests.post(TELEGRAM_WEBHOOK, json={"text": msg}, timeout=5)
-            except Exception:
-                pass
+    # Evening mode: prioritize the full night forecast
+    if is_evening:
+        # Use the best level for the entire night
+        if best_lvl_future and abs(best_err_future) > 1.0:
+            proactive_warning = True
+            if abs(best_lvl_future - state.radiator_level) >= 1:
+                best_lvl = best_lvl_future  # Use night forecast
+                adjustment_made = True
+                m.adjustments_made += 1
+                
+                msg = (
+                    f"🌙 NIGHT MODE: {state.room}: set radiator to {best_lvl_future}\n"
+                    f"🌡️ now {state.current_temp}°C → target {state.target_temp}°C\n"
+                    f"🔮 In {prediction_hours}h: predicted {prediction_details_future[ROOMS[state.room]['scale'].index(best_lvl_future)][f'predicted_temp_{prediction_hours}h']}°C (error: {best_err_future:.1f}°C)\n"
+                    f"🌤️ outside {state.outdoor_temp}°C, forecast {state.forecast_temp}°C\n"
+                    f"💤 Optimized for entire night ({prediction_hours} hours)"
+                )
+                if TELEGRAM_WEBHOOK:
+                    try:
+                        requests.post(TELEGRAM_WEBHOOK, json={"text": msg}, timeout=5)
+                    except Exception:
+                        pass
+        elif abs(best_lvl - state.radiator_level) >= 1:
+            adjustment_made = True
+            m.adjustments_made += 1
+            msg = (
+                f"🌙 {state.room}: set radiator to {best_lvl}\n"
+                f"🌡️ now {state.current_temp}°C → target {state.target_temp}°C\n"
+                f"🌤️ outside {state.outdoor_temp}°C, forecast {state.forecast_temp}°C"
+            )
+            if TELEGRAM_WEBHOOK:
+                try:
+                    requests.post(TELEGRAM_WEBHOOK, json={"text": msg}, timeout=5)
+                except Exception:
+                    pass
+    else:
+        # Daytime: check if future prediction shows problem
+        if best_lvl_future and abs(best_err_future) > 1.5:
+            proactive_warning = True
+            if abs(best_lvl_future - state.radiator_level) >= 1:
+                best_lvl = best_lvl_future
+                adjustment_made = True
+                m.adjustments_made += 1
+                
+                msg = (
+                    f"⚠️ PROACTIVE: {state.room}: set radiator to {best_lvl_future}\n"
+                    f"🌡️ now {state.current_temp}°C → target {state.target_temp}°C\n"
+                    f"🔮 In {prediction_hours}h: predicted {prediction_details_future[ROOMS[state.room]['scale'].index(best_lvl_future)][f'predicted_temp_{prediction_hours}h']}°C (error: {best_err_future:.1f}°C)\n"
+                    f"🌤️ outside {state.outdoor_temp}°C, forecast {state.forecast_temp}°C"
+                )
+                if TELEGRAM_WEBHOOK:
+                    try:
+                        requests.post(TELEGRAM_WEBHOOK, json={"text": msg}, timeout=5)
+                    except Exception:
+                        pass
+        elif abs(best_lvl - state.radiator_level) >= 1:
+            m.adjustments_made += 1
+            adjustment_made = True
+            
+            msg = (
+                f"🏠 {state.room}: set radiator to {best_lvl}\n"
+                f"🌡️ now {state.current_temp}°C → target {state.target_temp}°C\n"
+                f"🌤️ outside {state.outdoor_temp}°C, forecast {state.forecast_temp}°C"
+            )
+            if TELEGRAM_WEBHOOK:
+                try:
+                    requests.post(TELEGRAM_WEBHOOK, json={"text": msg}, timeout=5)
+                except Exception:
+                    pass
     
     # Update metrics in database
     db.update_ai_metrics(
@@ -342,11 +518,34 @@ def predict(state: RoomState):
         total_error=m.total_error
     )
     
+    # Calculate predicted temp for future for the best level
+    predicted_temp_future = None
+    if best_lvl_future is not None:
+        for detail in prediction_details_future:
+            if detail['level'] == best_lvl_future:
+                predicted_temp_future = detail[f'predicted_temp_{prediction_hours}h']
+                break
+    
+    # Save the future prediction for validation and training
+    if predicted_temp_future is not None:
+        db.save_future_prediction(
+            room=state.room,
+            hours_ahead=prediction_hours,
+            predicted_temp=predicted_temp_future,
+            radiator_level=best_lvl_future,
+            outdoor_temp=state.outdoor_temp,
+            forecast_temp=state.forecast_temp
+        )
+    
     # Save prediction to database
     db.save_prediction(
         state.room, state.current_temp, state.target_temp,
         state.radiator_level, best_lvl, best_err, adjustment_made,
-        state.outdoor_temp, state.forecast_temp
+        state.outdoor_temp, state.forecast_temp,
+        recommended_level_3h=best_lvl_future,
+        predicted_error_3h=best_err_future,
+        predicted_temp_3h=predicted_temp_future,
+        proactive_warning=proactive_warning
     )
     
     # Save room state to database
@@ -361,7 +560,15 @@ def predict(state: RoomState):
         "current_level": state.radiator_level,
         "adjustment_needed": adjustment_made,
         "predictions_made": m.predictions_made,
-        "prediction_details": prediction_details[:5]  # Top 5 options
+        "prediction_details": prediction_details[:5],
+        "forecast_future": {
+            "hours_ahead": prediction_hours,
+            "mode": "night" if is_evening else "day",
+            "recommended_level": best_lvl_future,
+            f"predicted_error_{prediction_hours}h": round(best_err_future, 2),
+            "proactive_warning": proactive_warning,
+            "prediction_details": prediction_details_future[:5]
+        }
     }
 
 @app.get("/stats")
@@ -432,6 +639,129 @@ def get_stats():
             "prediction_method": "Temperature delta prediction",
             "storage": "PostgreSQL Database",
             "persistence": "Models and data survive restarts"
+        }
+    }
+
+@app.post("/validate-predictions")
+def validate_predictions():
+    """Validate past predictions and use them for training"""
+    unvalidated = db.get_unvalidated_predictions()
+    
+    if not unvalidated:
+        return {
+            "validated": 0,
+            "trained": 0,
+            "message": "No predictions ready for validation"
+        }
+    
+    validated_count = 0
+    trained_count = 0
+    
+    for pred in unvalidated:
+        room = pred['room']
+        prediction_id = pred['id']
+        predicted_temp = pred['predicted_temp']
+        hours_ahead = pred['hours_ahead']
+        radiator_level = pred['radiator_level']
+        
+        # Get actual temperature at the target time
+        # Look for the closest room_state reading to target_timestamp
+        try:
+            conn = db.get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT current_temp, outdoor_temp 
+                FROM room_states
+                WHERE room = %s 
+                  AND timestamp >= %s - INTERVAL '30 minutes'
+                  AND timestamp <= %s + INTERVAL '30 minutes'
+                ORDER BY ABS(EXTRACT(EPOCH FROM (timestamp - %s)))
+                LIMIT 1
+            """, (room, pred['target_timestamp'], pred['target_timestamp'], pred['target_timestamp']))
+            
+            result = cursor.fetchone()
+            cursor.close()
+            conn.close()
+            
+            if result:
+                actual_temp = result[0]
+                actual_outdoor = result[1]
+                
+                # Validate the prediction
+                db.validate_prediction(prediction_id, actual_temp, used_for_training=True)
+                validated_count += 1
+                
+                # Use this for training!
+                # Calculate the actual delta that occurred
+                original_temp = predicted_temp - (hours_ahead * 0.1)  # Rough estimate of starting temp
+                actual_delta = actual_temp - original_temp
+                
+                # Load model and train on this real-world outcome
+                model = load_model(room)
+                
+                features = {
+                    "current_temp": original_temp,
+                    "target_temp": ROOMS[room]["target"],
+                    "outdoor_temp": actual_outdoor or pred['outdoor_temp'],
+                    "forecast_temp": pred['forecast_temp'],
+                    "radiator_level": radiator_level,
+                    "hour_of_day": pred['target_timestamp'].hour,
+                }
+                
+                # Train the model with the actual outcome
+                model.learn_one(features, actual_delta)
+                save_model(room, model)
+                
+                # Update metrics
+                m = model_metrics[room]
+                m.training_samples += 1
+                
+                # Save training event
+                db.save_training_event(
+                    room, original_temp, ROOMS[room]["target"],
+                    radiator_level, actual_delta,
+                    actual_outdoor, pred['forecast_temp'],
+                    predicted_delta=(predicted_temp - original_temp),
+                    hour_of_day=pred['target_timestamp'].hour
+                )
+                
+                # Update metrics in database
+                db.update_ai_metrics(
+                    room,
+                    training_samples=m.training_samples
+                )
+                
+                trained_count += 1
+                
+                print(f"✅ Validated & trained {room}: predicted {predicted_temp:.1f}°C, actual {actual_temp:.1f}°C (error: {abs(predicted_temp - actual_temp):.2f}°C)")
+            else:
+                # No matching temperature data found, just mark as validated without training
+                db.validate_prediction(prediction_id, None, used_for_training=False)
+                validated_count += 1
+                
+        except Exception as e:
+            print(f"Error validating prediction {prediction_id}: {e}")
+            continue
+    
+    return {
+        "validated": validated_count,
+        "trained": trained_count,
+        "message": f"Validated {validated_count} predictions, trained on {trained_count}"
+    }
+
+@app.get("/validation-stats")
+def get_validation_statistics(days: int = 7):
+    """Get statistics on prediction validation accuracy"""
+    stats = db.get_validation_stats(days=days)
+    
+    return {
+        "days": days,
+        "rooms": stats,
+        "summary": {
+            "total_predictions": sum(s.get('total_predictions', 0) for s in stats.values()),
+            "total_trained": sum(s.get('used_for_training', 0) for s in stats.values()),
+            "avg_error": sum(s.get('avg_error', 0) for s in stats.values()) / max(1, len(stats))
         }
     }
 
@@ -577,34 +907,32 @@ def export_room_csv(room: str, hours: int = 168):  # Default 1 week
 
 @app.get("/ui", response_class=HTMLResponse)
 def ui_dashboard():
-    """Web UI dashboard showing AI service status, training, and predictions"""
+    """Enhanced web UI dashboard with validation stats and advanced analytics"""
     from fastapi.responses import HTMLResponse
     
     try:
-        # Get latest training events (last 10)
         latest_training = db.get_latest_training_events(limit=10)
-        
-        # Get latest predictions (last 10)
         latest_predictions = db.get_latest_predictions(limit=10)
-        
-        # Get training count in last 24 hours
         training_count_24h = db.get_training_count_last_24h()
-        
-        # Get overall metrics
         all_metrics = db.get_ai_metrics()
+        validation_stats = db.get_validation_stats(days=7)
         
-        # Get current weather
+        # Get weather
         try:
-            outdoor, forecast = get_weather()
-            if outdoor is None:
-                outdoor = "N/A"
-            if forecast is None:
-                forecast = "N/A"
+            outdoor, forecast_3h, forecast_10h = get_weather()
+            outdoor = outdoor if outdoor else "N/A"
+            forecast_3h = forecast_3h if forecast_3h else "N/A"
+            forecast_10h = forecast_10h if forecast_10h else "N/A"
         except Exception:
-            outdoor, forecast = "N/A", "N/A"
+            outdoor, forecast_3h, forecast_10h = "N/A", "N/A", "N/A"
         
-        # Build HTML
-        html_content = f"""
+        # Calculate totals
+        total_predictions = sum(m.get('predictions_made', 0) for m in all_metrics.values())
+        total_trained = sum(m.get('training_samples', 0) for m in all_metrics.values())
+        total_validated = sum(v.get('total_predictions', 0) for v in validation_stats.values())
+        avg_validation_error = sum(v.get('avg_error', 0) for v in validation_stats.values()) / max(1, len(validation_stats))
+        
+        html = f"""
 <!DOCTYPE html>
 <html>
 <head>
@@ -612,11 +940,7 @@ def ui_dashboard():
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Smart Radiator AI - Dashboard</title>
     <style>
-        * {{
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }}
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -624,36 +948,19 @@ def ui_dashboard():
             padding: 20px;
             min-height: 100vh;
         }}
-        .container {{
-            max-width: 1400px;
-            margin: 0 auto;
-        }}
+        .container {{ max-width: 1600px; margin: 0 auto; }}
         .header {{
             background: white;
             padding: 30px;
             border-radius: 15px;
             box-shadow: 0 10px 30px rgba(0,0,0,0.2);
             margin-bottom: 30px;
-            text-align: center;
         }}
-        .header h1 {{
-            color: #667eea;
-            font-size: 2.5em;
-            margin-bottom: 10px;
-        }}
-        .header .status {{
-            color: #28a745;
-            font-size: 1.2em;
-            font-weight: bold;
-        }}
-        .header .timestamp {{
-            color: #666;
-            font-size: 0.9em;
-            margin-top: 10px;
-        }}
+        .header h1 {{ color: #667eea; font-size: 2.5em; margin-bottom: 10px; }}
+        .header .status {{ color: #28a745; font-size: 1.2em; font-weight: bold; }}
         .stats-grid {{
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 20px;
             margin-bottom: 30px;
         }}
@@ -666,21 +973,17 @@ def ui_dashboard():
         }}
         .stat-card h3 {{
             color: #667eea;
-            font-size: 0.9em;
+            font-size: 0.85em;
             text-transform: uppercase;
-            letter-spacing: 1px;
             margin-bottom: 10px;
         }}
         .stat-card .value {{
-            font-size: 2.5em;
+            font-size: 2.2em;
             font-weight: bold;
             color: #333;
             margin: 10px 0;
         }}
-        .stat-card .label {{
-            color: #666;
-            font-size: 0.85em;
-        }}
+        .stat-card .label {{ color: #666; font-size: 0.85em; }}
         .section {{
             background: white;
             padding: 30px;
@@ -690,7 +993,7 @@ def ui_dashboard():
         }}
         .section h2 {{
             color: #667eea;
-            font-size: 1.8em;
+            font-size: 1.6em;
             margin-bottom: 20px;
             padding-bottom: 10px;
             border-bottom: 3px solid #667eea;
@@ -699,24 +1002,18 @@ def ui_dashboard():
             width: 100%;
             border-collapse: collapse;
             margin-top: 15px;
+            font-size: 0.9em;
         }}
         th {{
             background: #667eea;
             color: white;
-            padding: 12px;
+            padding: 10px;
             text-align: left;
             font-weight: 600;
-            text-transform: uppercase;
-            font-size: 0.85em;
-            letter-spacing: 0.5px;
+            font-size: 0.8em;
         }}
-        td {{
-            padding: 12px;
-            border-bottom: 1px solid #eee;
-        }}
-        tr:hover {{
-            background: #f8f9fa;
-        }}
+        td {{ padding: 10px; border-bottom: 1px solid #eee; }}
+        tr:hover {{ background: #f8f9fa; }}
         .room-badge {{
             display: inline-block;
             padding: 4px 12px;
@@ -728,32 +1025,32 @@ def ui_dashboard():
         .room-Kontor {{ background: #f3e5f5; color: #7b1fa2; }}
         .room-Vardagsrum {{ background: #fff3e0; color: #e65100; }}
         .room-Badrum {{ background: #e8f5e9; color: #2e7d32; }}
-        .temp {{
-            font-weight: 600;
-            color: #ff6b6b;
+        .good {{ color: #28a745; font-weight: bold; }}
+        .warning {{ color: #ffc107; font-weight: bold; }}
+        .info {{ color: #17a2b8; font-weight: bold; }}
+        .metrics-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 15px;
         }}
-        .target {{
-            font-weight: 600;
-            color: #4ecdc4;
+        .metric-box {{
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
         }}
-        .good {{
-            color: #28a745;
+        .metric-box .metric-label {{
+            font-size: 0.8em;
+            color: #666;
+            text-transform: uppercase;
+        }}
+        .metric-box .metric-value {{
+            font-size: 1.8em;
             font-weight: bold;
+            color: #333;
+            margin: 5px 0;
         }}
-        .warning {{
-            color: #ffc107;
-            font-weight: bold;
-        }}
-        .info {{
-            color: #17a2b8;
-            font-weight: bold;
-        }}
-        .no-data {{
-            text-align: center;
-            padding: 40px;
-            color: #999;
-            font-style: italic;
-        }}
+        .metric-box .metric-sub {{ font-size: 0.85em; color: #666; margin-top: 5px; }}
         .refresh-btn {{
             position: fixed;
             bottom: 30px;
@@ -767,36 +1064,23 @@ def ui_dashboard():
             font-weight: bold;
             cursor: pointer;
             box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
-            transition: all 0.3s ease;
         }}
-        .refresh-btn:hover {{
-            background: #764ba2;
-            transform: translateY(-2px);
-            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.6);
+        .progress-bar {{
+            background: #e0e0e0;
+            border-radius: 10px;
+            height: 20px;
+            overflow: hidden;
+            margin-top: 10px;
         }}
-        .metrics-grid {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
-            margin-top: 20px;
-        }}
-        .metric-box {{
-            background: #f8f9fa;
-            padding: 15px;
-            border-radius: 8px;
-            border-left: 4px solid #667eea;
-        }}
-        .metric-box .metric-label {{
+        .progress-fill {{
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
             font-size: 0.8em;
-            color: #666;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }}
-        .metric-box .metric-value {{
-            font-size: 1.5em;
             font-weight: bold;
-            color: #333;
-            margin-top: 5px;
         }}
     </style>
 </head>
@@ -804,222 +1088,227 @@ def ui_dashboard():
     <div class="container">
         <div class="header">
             <h1>🏠 Smart Radiator AI Dashboard</h1>
-            <div class="status">✅ System Online</div>
-            <div class="timestamp">Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>
+            <div class="status">✅ System Online - v2.1.0</div>
+            <p style="color:#666;margin-top:10px">Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
         </div>
 
         <div class="stats-grid">
             <div class="stat-card">
-                <h3>Training Events (24h)</h3>
-                <div class="value good">{training_count_24h}</div>
-                <div class="label">Model updates in last 24 hours</div>
+                <h3>🎓 Training Samples</h3>
+                <div class="value good">{total_trained}</div>
+                <div class="label">Total model training events</div>
+                <div class="label" style="margin-top:5px">{training_count_24h} in last 24h</div>
             </div>
             <div class="stat-card">
-                <h3>Total Rooms</h3>
-                <div class="value info">{len(ROOMS)}</div>
-                <div class="label">Active monitoring zones</div>
+                <h3>🎯 Predictions Made</h3>
+                <div class="value info">{total_predictions}</div>
+                <div class="label">AI recommendations</div>
             </div>
             <div class="stat-card">
-                <h3>Outdoor Temperature</h3>
-                <div class="value temp">{outdoor}°C</div>
-                <div class="label">Current weather</div>
+                <h3>✅ Validated</h3>
+                <div class="value warning">{total_validated}</div>
+                <div class="label">Self-learning cycles</div>
+                <div class="label" style="margin-top:5px">Avg error: {avg_validation_error:.2f}°C</div>
             </div>
             <div class="stat-card">
-                <h3>Forecast (3h)</h3>
-                <div class="value target">{forecast}°C</div>
-                <div class="label">Predicted temperature</div>
+                <h3>🌡️ Current Weather</h3>
+                <div class="value">{outdoor}°C</div>
+                <div class="label">3h: {forecast_3h}°C | 10h: {forecast_10h}°C</div>
             </div>
         </div>
 
         <div class="section">
-            <h2>📊 Room Performance Metrics</h2>
+            <h2>📊 Per-Room Analytics</h2>
             <div class="metrics-grid">
 """
         
-        # Add room metrics
         for room, metrics in all_metrics.items():
-            training_samples = metrics.get('training_samples', 0)
-            predictions_made = metrics.get('predictions_made', 0)
+            training = metrics.get('training_samples', 0)
+            predictions = metrics.get('predictions_made', 0)
             mae = metrics.get('mae', 0)
+            r2 = metrics.get('r2_score', 0)
             
-            html_content += f"""
+            val_stats = validation_stats.get(room, {})
+            val_count = val_stats.get('total_predictions', 0)
+            val_error = val_stats.get('avg_error', 0)
+            
+            accuracy = max(0, (1 - val_error) * 100) if val_error > 0 else 0
+            
+            html += f"""
                 <div class="metric-box">
                     <div class="metric-label">{room}</div>
-                    <div class="metric-value">{training_samples}</div>
-                    <div class="label">Training samples</div>
-                    <div class="label" style="margin-top: 5px;">MAE: {mae:.3f}</div>
-                    <div class="label">Predictions: {predictions_made}</div>
+                    <div class="metric-value">{training}</div>
+                    <div class="metric-sub">Training samples</div>
+                    <div class="metric-sub">MAE: {mae:.3f} | R²: {r2:.3f}</div>
+                    <div class="metric-sub">Predictions: {predictions}</div>
+                    <div class="metric-sub">Validated: {val_count} (±{val_error:.2f}°C)</div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width:{min(100, accuracy)}%">
+                            {accuracy:.0f}% accuracy
+                        </div>
+                    </div>
                 </div>
 """
         
-        html_content += """
+        html += """
             </div>
         </div>
-
-        <div class="section">
-            <h2>🎓 Latest Training Events</h2>
 """
         
+        # Validation statistics section
+        if validation_stats:
+            html += """
+        <div class="section">
+            <h2>✅ Prediction Validation Stats (Last 7 Days)</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Room</th>
+                        <th>Predictions Made</th>
+                        <th>Used for Training</th>
+                        <th>Avg Error</th>
+                        <th>Min Error</th>
+                        <th>Max Error</th>
+                        <th>Accuracy</th>
+                    </tr>
+                </thead>
+                <tbody>
+"""
+            for room, vstats in validation_stats.items():
+                total = vstats.get('total_predictions', 0)
+                used = vstats.get('used_for_training', 0)
+                avg_err = vstats.get('avg_error', 0)
+                min_err = vstats.get('min_error', 0)
+                max_err = vstats.get('max_error', 0)
+                accuracy = max(0, (1 - avg_err) * 100) if avg_err > 0 else 0
+                
+                html += f"""
+                    <tr>
+                        <td><span class="room-badge room-{room}">{room}</span></td>
+                        <td>{total}</td>
+                        <td class="good">{used}</td>
+                        <td>{avg_err:.3f}°C</td>
+                        <td class="good">{min_err:.3f}°C</td>
+                        <td class="warning">{max_err:.3f}°C</td>
+                        <td class="info">{accuracy:.1f}%</td>
+                    </tr>
+"""
+            
+            html += """
+                </tbody>
+            </table>
+        </div>
+"""
+        
+        # Latest training
         if latest_training:
-            html_content += """
-            <table>
-                <thead>
-                    <tr>
-                        <th>Timestamp</th>
-                        <th>Room</th>
-                        <th>Current Temp</th>
-                        <th>Target Temp</th>
-                        <th>Radiator Level</th>
-                        <th>Temp Delta</th>
-                        <th>Predicted Delta</th>
-                        <th>Outdoor Temp</th>
-                    </tr>
-                </thead>
-                <tbody>
-"""
-            for event in latest_training:
-                room = event['room']
-                timestamp = event['timestamp'].strftime('%Y-%m-%d %H:%M:%S') if isinstance(event['timestamp'], datetime) else str(event['timestamp'])
-                current_temp = event['current_temp']
-                target_temp = event['target_temp']
-                radiator_level = event['radiator_level']
-                temp_delta = event['temperature_delta']
-                predicted_delta = event.get('predicted_delta')
-                outdoor_temp = event.get('outdoor_temp', 'N/A')
-                
-                predicted_str = f"{predicted_delta:.3f}" if predicted_delta is not None else "N/A"
-                
-                html_content += f"""
-                    <tr>
-                        <td>{timestamp}</td>
-                        <td><span class="room-badge room-{room}">{room}</span></td>
-                        <td class="temp">{current_temp:.1f}°C</td>
-                        <td class="target">{target_temp:.1f}°C</td>
-                        <td>{radiator_level}</td>
-                        <td>{temp_delta:+.3f}°C</td>
-                        <td>{predicted_str}</td>
-                        <td>{outdoor_temp if outdoor_temp != 'N/A' else 'N/A'}</td>
-                    </tr>
-"""
-            
-            html_content += """
-                </tbody>
-            </table>
-"""
-        else:
-            html_content += '<div class="no-data">No training events found</div>'
-        
-        html_content += """
-        </div>
-
+            html += """
         <div class="section">
-            <h2>🎯 Latest Predictions</h2>
-"""
-        
-        if latest_predictions:
-            html_content += """
+            <h2>🎓 Recent Training Events</h2>
             <table>
                 <thead>
                     <tr>
-                        <th>Timestamp</th>
+                        <th>Time</th>
                         <th>Room</th>
-                        <th>Current Temp</th>
-                        <th>Target Temp</th>
-                        <th>Current Level</th>
-                        <th>Recommended Level</th>
-                        <th>Predicted Error</th>
-                        <th>Adjustment Made</th>
+                        <th>Current</th>
+                        <th>Target</th>
+                        <th>Level</th>
+                        <th>Delta</th>
+                        <th>Predicted</th>
+                        <th>Error</th>
                     </tr>
                 </thead>
                 <tbody>
 """
-            for pred in latest_predictions:
-                room = pred['room']
-                timestamp = pred['timestamp'].strftime('%Y-%m-%d %H:%M:%S') if isinstance(pred['timestamp'], datetime) else str(pred['timestamp'])
-                current_temp = pred['current_temp']
-                target_temp = pred['target_temp']
-                current_level = pred['current_radiator_level']
-                recommended_level = pred['recommended_level']
-                predicted_error = pred['predicted_error']
-                adjustment_made = pred['adjustment_made']
+            for event in latest_training[:5]:
+                room = event['room']
+                timestamp = event['timestamp'].strftime('%H:%M:%S') if isinstance(event['timestamp'], datetime) else str(event['timestamp'])
+                delta = event['temperature_delta']
+                pred_delta = event.get('predicted_delta')
+                error = abs(delta - pred_delta) if pred_delta is not None else 0
                 
-                adjustment_icon = "✅" if adjustment_made else "➖"
-                adjustment_class = "good" if adjustment_made else "info"
-                
-                html_content += f"""
+                html += f"""
                     <tr>
                         <td>{timestamp}</td>
                         <td><span class="room-badge room-{room}">{room}</span></td>
-                        <td class="temp">{current_temp:.1f}°C</td>
-                        <td class="target">{target_temp:.1f}°C</td>
-                        <td>{current_level}</td>
-                        <td class="{adjustment_class}">{recommended_level}</td>
-                        <td>{predicted_error:.2f}°C</td>
-                        <td class="{adjustment_class}">{adjustment_icon}</td>
+                        <td>{event['current_temp']:.1f}°C</td>
+                        <td>{event['target_temp']:.1f}°C</td>
+                        <td>{event['radiator_level']}</td>
+                        <td>{delta:+.2f}°C</td>
+                        <td>{pred_delta:.2f}°C if pred_delta else 'N/A'}</td>
+                        <td class="{'good' if error < 0.3 else 'warning' if error < 0.6 else 'info'}">{error:.2f}°C</td>
                     </tr>
 """
             
-            html_content += """
+            html += """
                 </tbody>
             </table>
-"""
-        else:
-            html_content += '<div class="no-data">No predictions found</div>'
-        
-        html_content += """
         </div>
-
+"""
+        
+        # Latest predictions
+        if latest_predictions:
+            html += """
+        <div class="section">
+            <h2>🎯 Recent Predictions</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Room</th>
+                        <th>Current</th>
+                        <th>Target</th>
+                        <th>Recommended</th>
+                        <th>Error</th>
+                        <th>Adjusted</th>
+                    </tr>
+                </thead>
+                <tbody>
+"""
+            for pred in latest_predictions[:5]:
+                room = pred['room']
+                timestamp = pred['timestamp'].strftime('%H:%M:%S') if isinstance(pred['timestamp'], datetime) else str(pred['timestamp'])
+                adjusted = "✅" if pred['adjustment_made'] else "➖"
+                
+                html += f"""
+                    <tr>
+                        <td>{timestamp}</td>
+                        <td><span class="room-badge room-{room}">{room}</span></td>
+                        <td>{pred['current_temp']:.1f}°C</td>
+                        <td>{pred['target_temp']:.1f}°C</td>
+                        <td class="{'good' if pred['adjustment_made'] else 'info'}">{pred['recommended_level']}</td>
+                        <td>{pred['predicted_error']:.2f}°C</td>
+                        <td>{adjusted}</td>
+                    </tr>
+"""
+            
+            html += """
+                </tbody>
+            </table>
+        </div>
+"""
+        
+        html += """
         <button class="refresh-btn" onclick="location.reload()">🔄 Refresh</button>
     </div>
-
     <script>
-        // Auto-refresh every 30 seconds
-        setTimeout(function() {
-            location.reload();
-        }, 30000);
+        setTimeout(() => location.reload(), 30000);
     </script>
 </body>
 </html>
 """
         
-        return HTMLResponse(content=html_content)
+        return HTMLResponse(content=html)
         
     except Exception as e:
-        error_html = f"""
+        return HTMLResponse(content=f"""
 <!DOCTYPE html>
 <html>
-<head>
-    <title>Error - Smart Radiator AI</title>
-    <style>
-        body {{
-            font-family: Arial, sans-serif;
-            background: #f44336;
-            color: white;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            height: 100vh;
-            margin: 0;
-        }}
-        .error-container {{
-            background: white;
-            color: #333;
-            padding: 40px;
-            border-radius: 10px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
-            text-align: center;
-        }}
-        h1 {{ color: #f44336; }}
-    </style>
-</head>
-<body>
-    <div class="error-container">
-        <h1>⚠️ Error</h1>
-        <p>Could not load dashboard: {str(e)}</p>
-        <p><a href="/ui">Try again</a></p>
-    </div>
+<head><title>Error</title></head>
+<body style="font-family:Arial;padding:50px;text-align:center">
+    <h1 style="color:red">⚠️ Error Loading Dashboard</h1>
+    <p>{str(e)}</p>
+    <p><a href="/ui">Try again</a></p>
 </body>
 </html>
-"""
-        return HTMLResponse(content=error_html, status_code=500)
-
+""", status_code=500)

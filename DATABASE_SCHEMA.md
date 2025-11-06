@@ -342,12 +342,12 @@ Database tables are created automatically on first run via `db.init_database()`.
 
 ### Backup Database
 ```bash
-docker-compose exec postgres pg_dump -U postgres radiators > backup.sql
+docker-compose exec postgres pg_dump -U postgres smart_radiator_ai > backup.sql
 ```
 
 ### Restore Database
 ```bash
-cat backup.sql | docker-compose exec -T postgres psql -U postgres radiators
+cat backup.sql | docker-compose exec -T postgres psql -U postgres smart_radiator_ai
 ```
 
 ### Export All Data

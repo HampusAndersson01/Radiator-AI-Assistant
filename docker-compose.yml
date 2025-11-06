@@ -5,7 +5,7 @@ services:
       - "8000:8000"
     environment:
       - TELEGRAM_WEBHOOK=${TELEGRAM_WEBHOOK:-}
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@${POSTGRES_HOST:-host.docker.internal}:5432/radiator
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@${POSTGRES_HOST:-host.docker.internal}:5432/smart_radiator_ai
     restart: unless-stopped
 
   bot:
@@ -13,7 +13,7 @@ services:
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
       - AI_URL=http://ai_service:8000/train
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@${POSTGRES_HOST:-host.docker.internal}:5432/radiator
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@${POSTGRES_HOST:-host.docker.internal}:5432/smart_radiator_ai
       - ALLOWED_CHAT_IDS=${ALLOWED_CHAT_IDS:-}
     depends_on:
       - ai_service

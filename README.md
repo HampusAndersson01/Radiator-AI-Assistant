@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🏠 Smart Radiator Assistant
+# 🏠 Radiator AI Assistant
 
 **Intelligent home heating automation with AI-powered predictions**
 
@@ -25,8 +25,8 @@ Smart Radiator Assistant is a complete home automation solution that uses **onli
 
 ```
 ┌─────────────────┐      ┌──────────────────┐      ┌─────────────────┐
-│   Home Assistant │      │      n8n         │      │   Telegram Bot  │
-│   (Sensors)      │─────▶│   (Automation)   │◀────▶│  (Manual Ctrl)  │
+│  Home Assistant │      │      n8n         │      │   Telegram Bot  │
+│   (Sensors)     │────▶│   (Automation)    │◀──▶│  (Manual Ctrl)  │
 └─────────────────┘      └──────────────────┘      └─────────────────┘
                                   │
                                   ▼

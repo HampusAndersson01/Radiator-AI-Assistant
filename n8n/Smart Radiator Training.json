@@ -3,13 +3,13 @@
   "nodes": [
     {
       "parameters": {
-        "url": "https://home.nmless.xyz/api/states",
+        "url": "={{ $env.HOME_ASSISTANT_URL }}/api/states",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
             {
               "name": "Authorization",
-              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJjMWVjMmU2MWE0MjE0OGUzYmNmNjRkZGIwMWFkODc0YSIsImlhdCI6MTc2MjI1MDQyOSwiZXhwIjoyMDc3NjEwNDI5fQ.gur4nUOjrXY9ZZhKVKV6UJXA9Q-auSAK_Y8MtbsQ410"
+              "value": "Bearer {{ $env.HOME_ASSISTANT_TOKEN }}"
             }
           ]
         },
@@ -26,7 +26,7 @@
     },
     {
       "parameters": {
-        "url": "http://192.168.1.183:8000/",
+        "url": "={{ $env.AI_SERVICE_URL }}/",
         "options": {}
       },
       "id": "69e6f9ea-cb2d-4342-ae6f-dfd75b9e65f1",
@@ -55,7 +55,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "http://192.168.1.183:8000/train",
+        "url": "={{ $env.AI_SERVICE_URL }}/train",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ $json }}",
@@ -92,13 +92,13 @@
     },
     {
       "parameters": {
-        "url": "https://home.nmless.xyz/api/states",
+        "url": "={{ $env.HOME_ASSISTANT_URL }}/api/states",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
             {
               "name": "Authorization",
-              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJjMWVjMmU2MWE0MjE0OGUzYmNmNjRkZGIwMWFkODc0YSIsImlhdCI6MTc2MjI1MDQyOSwiZXhwIjoyMDc3NjEwNDI5fQ.gur4nUOjrXY9ZZhKVKV6UJXA9Q-auSAK_Y8MtbsQ410"
+              "value": "Bearer {{ $env.HOME_ASSISTANT_TOKEN }}"
             }
           ]
         },
@@ -129,7 +129,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "http://192.168.1.183:8000/predict",
+        "url": "={{ $env.AI_SERVICE_URL }}/predict",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ $json }}",
@@ -180,7 +180,7 @@
     },
     {
       "parameters": {
-        "chatId": "6483085285",
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
         "text": "={{ $json }}",
         "additionalFields": {}
       },
@@ -192,10 +192,10 @@
       ],
       "id": "b416b431-2966-44eb-8a09-f1ab34e17924",
       "name": "Send a text message",
-      "webhookId": "02e4dbb0-b33b-46d2-b87b-671a44fcde81",
+      "webhookId": "REPLACE_WITH_YOUR_WEBHOOK_ID",
       "credentials": {
         "telegramApi": {
-          "id": "psz9OooRoIM4uAKv",
+          "id": "CONFIGURE_IN_N8N_CREDENTIALS",
           "name": "Telegram account"
         }
       }

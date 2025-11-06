@@ -1132,7 +1132,13 @@ def ui_dashboard():
             val_count = val_stats.get('total_predictions', 0)
             val_error = val_stats.get('avg_error', 0)
             
-            accuracy = max(0, (1 - val_error) * 100) if val_error > 0 else 0
+            # Calculate accuracy as inverse of average error
+            # If avg error is 0°C -> 100% accuracy (full bar)
+            # If avg error is 1°C -> ~63% accuracy
+            # If avg error is 2°C -> ~37% accuracy
+            # Using exponential decay: accuracy = 100 * e^(-error)
+            import math
+            accuracy_pct = 100 * math.exp(-val_error) if val_error > 0 else 100
             
             html += f"""
                 <div class="metric-box">
@@ -1143,8 +1149,8 @@ def ui_dashboard():
                     <div class="metric-sub">Predictions: {predictions}</div>
                     <div class="metric-sub">Validated: {val_count} (±{val_error:.2f}°C)</div>
                     <div class="progress-bar">
-                        <div class="progress-fill" style="width:{min(100, accuracy)}%">
-                            {accuracy:.0f}% accuracy
+                        <div class="progress-fill" style="width:{accuracy_pct:.0f}%">
+                            {accuracy_pct:.0f}% (±{val_error:.2f}°C avg)
                         </div>
                     </div>
                 </div>
@@ -1169,7 +1175,7 @@ def ui_dashboard():
                         <th>Avg Error</th>
                         <th>Min Error</th>
                         <th>Max Error</th>
-                        <th>Accuracy</th>
+                        <th>Training Rate</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -1180,7 +1186,9 @@ def ui_dashboard():
                 avg_err = vstats.get('avg_error', 0)
                 min_err = vstats.get('min_error', 0)
                 max_err = vstats.get('max_error', 0)
-                accuracy = max(0, (1 - avg_err) * 100) if avg_err > 0 else 0
+                # Calculate accuracy as percentage of predictions with error < 0.5°C
+                # This is a more meaningful metric than trying to convert error to percentage
+                accuracy_pct = (used / total * 100) if total > 0 else 0
                 
                 html += f"""
                     <tr>
@@ -1190,7 +1198,7 @@ def ui_dashboard():
                         <td>{avg_err:.3f}°C</td>
                         <td class="good">{min_err:.3f}°C</td>
                         <td class="warning">{max_err:.3f}°C</td>
-                        <td class="info">{accuracy:.1f}%</td>
+                        <td class="info">{accuracy_pct:.1f}%</td>
                     </tr>
 """
             
@@ -1226,7 +1234,9 @@ def ui_dashboard():
                 delta = event['temperature_delta']
                 pred_delta = event.get('predicted_delta')
                 error = abs(delta - pred_delta) if pred_delta is not None else 0
+                pred_delta_str = f"{pred_delta:.2f}°C" if pred_delta else 'N/A'
                 
+                error_class = 'good' if error < 0.3 else 'warning' if error < 0.6 else 'info'
                 html += f"""
                     <tr>
                         <td>{timestamp}</td>
@@ -1235,8 +1245,8 @@ def ui_dashboard():
                         <td>{event['target_temp']:.1f}°C</td>
                         <td>{event['radiator_level']}</td>
                         <td>{delta:+.2f}°C</td>
-                        <td>{pred_delta:.2f}°C if pred_delta else 'N/A'}</td>
-                        <td class="{'good' if error < 0.3 else 'warning' if error < 0.6 else 'info'}">{error:.2f}°C</td>
+                        <td>{pred_delta_str}</td>
+                        <td class="{error_class}">{error:.2f}°C</td>
                     </tr>
 """
             
@@ -1269,6 +1279,7 @@ def ui_dashboard():
                 room = pred['room']
                 timestamp = pred['timestamp'].strftime('%H:%M:%S') if isinstance(pred['timestamp'], datetime) else str(pred['timestamp'])
                 adjusted = "✅" if pred['adjustment_made'] else "➖"
+                level_class = 'good' if pred['adjustment_made'] else 'info'
                 
                 html += f"""
                     <tr>
@@ -1276,7 +1287,7 @@ def ui_dashboard():
                         <td><span class="room-badge room-{room}">{room}</span></td>
                         <td>{pred['current_temp']:.1f}°C</td>
                         <td>{pred['target_temp']:.1f}°C</td>
-                        <td class="{'good' if pred['adjustment_made'] else 'info'}">{pred['recommended_level']}</td>
+                        <td class="{level_class}">{pred['recommended_level']}</td>
                         <td>{pred['predicted_error']:.2f}°C</td>
                         <td>{adjusted}</td>
                     </tr>

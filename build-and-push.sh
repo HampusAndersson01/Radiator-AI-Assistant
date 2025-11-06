@@ -30,7 +30,7 @@ fi
 
 # Build AI Service
 echo -e "${BLUE}Building AI Service...${NC}"
-docker build -t "${AI_SERVICE_IMAGE}:${VERSION_TAG}" ./ai_service
+docker build --no-cache -t "${AI_SERVICE_IMAGE}:${VERSION_TAG}" ./ai_service
 if [ "$VERSION_TAG" != "latest" ]; then
     docker tag "${AI_SERVICE_IMAGE}:${VERSION_TAG}" "${AI_SERVICE_IMAGE}:latest"
 fi
@@ -39,7 +39,7 @@ echo ""
 
 # Build Bot
 echo -e "${BLUE}Building Bot...${NC}"
-docker build -t "${BOT_IMAGE}:${VERSION_TAG}" ./bot
+docker build --no-cache -t "${BOT_IMAGE}:${VERSION_TAG}" ./bot
 if [ "$VERSION_TAG" != "latest" ]; then
     docker tag "${BOT_IMAGE}:${VERSION_TAG}" "${BOT_IMAGE}:latest"
 fi
